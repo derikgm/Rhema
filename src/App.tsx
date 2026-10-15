@@ -1,10 +1,26 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
+import ModelPicker from "@/components/ModelPicker";
+import Editor from "@/components/Editor";
+import ExportButtons from "@/components/ExportButtons";
+import FileTree from "@/components/FileTree";
 
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
+  const [text, setText] = useState("");
+  const [currentFile, setCurrentFile] = useState("");
+  const [autoSaveFile, setAutoSaveFile] = useState(false);
+
+  useEffect(() => {
+    if (!autoSaveFile || !currentFile) return;
+    const id = setInterval(() => {
+      invoke("save_text", { path: currentFile, content: text }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [autoSaveFile, currentFile, text]);
+  const [voicePunctuation, setVoicePunctuation] = useState(false);
 
   async function greet() {
     setGreetMsg(await invoke("greet", { name }));
@@ -37,6 +53,26 @@ function App() {
         </button>
       </form>
       <p>{greetMsg}</p>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="md:col-span-1"><FileTree onOpen={(p, t) => { setCurrentFile(p); setText(t); }} /></div>
+        <div className="md:col-span-2 space-y-3">
+          {currentFile && <div className="text-xs text-slate-400 truncate">Archivo: {currentFile}</div>}
+          {currentFile && (
+            <div className="flex items-center gap-4 text-sm text-slate-300">
+              <label className="flex items-center gap-2"><input type="checkbox" checked={autoSaveFile} onChange={(e) => setAutoSaveFile(e.target.checked)} /> Autoguardar archivo</label>
+              <button className="px-3 py-1 bg-slate-700 rounded" onClick={() => invoke("save_text", { path: currentFile, content: text })}>Guardar ahora</button>
+            </div>
+          )}
+          <Editor value={text} onChange={setText} voicePunctuation={voicePunctuation} />
+        </div>
+      </div>
+      <ExportButtons text={text} />
+      <label className="flex items-center gap-2 text-slate-300 text-sm">
+        <input type="checkbox" checked={voicePunctuation} onChange={(e) => setVoicePunctuation(e.target.checked)} />
+        Puntuación por voz (coma, punto, nueva línea...)
+      </label>
+      <ExportButtons text={text} />
+      <ModelPicker />
     </main>
   );
 }

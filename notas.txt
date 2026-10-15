@@ -1,0 +1,23 @@
+# Comandos para descargar modelos (sherpa-onnx)
+
+## Streaming (inglés, ~70 MB)
+cd /workspaces/Rhema/src-tauri
+mkdir -p models && cd models
+curl -L -o sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2
+tar xvf sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2
+mv sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/* .
+rm -rf sherpa-onnx-streaming-zipformer-en-20M-2023-02-17
+
+## Multilingüe (offline, ~99 MB)
+cd /workspaces/Rhema/src-tauri/models
+curl -L -o sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2
+tar xvf sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2
+mv sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02/* .
+rm -rf sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02
+EOF
+## VAD (Silero) requerido para segmentar por voz
+cd /workspaces/Rhema/src-tauri/models
+curl -L -o silero_vad.onnx \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
