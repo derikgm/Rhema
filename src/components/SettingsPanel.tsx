@@ -105,11 +105,12 @@ export function SettingsPanel({
   }, [open, loadModels]);
 
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
     const unlisten = listen<Progress>("model-download-progress", (e) => {
       setProgress((p) => ({ ...p, [e.payload.filename]: e.payload }));
     });
     return () => {
-      unlisten.then((f) => f());
+      unlisten.then((f) => f()).catch(() => {});
     };
   }, []);
 

@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Sidebar } from "./components/Sidebar";
 import { FileEntry } from "./components/FolderTree";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { applyVoicePunctuation } from "./utils/postprocessPunctuation";
 
-type EditorState = "idle" | "listening" | "processing";
+type EditorState = "idle" | "listening" | "loading";
 
 interface NoteData {
   name: string;
@@ -31,6 +33,10 @@ function App() {
   // Save state
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+
+  // Dictado
+  const [micError, setMicError] = useState("");
+  const [audioLevel, setAudioLevel] = useState(0);
 
   // Responsive detection
   useEffect(() => {
@@ -155,13 +161,87 @@ function App() {
     if (isMobile) setMobileMenuOpen(false);
   }, [rootPath, isMobile, currentNote, hasUnsavedChanges, text]);
 
-  const toggleListening = () => {
-    if (editorState === "idle") {
-      setEditorState("listening");
-    } else {
+  // Transcripción en vivo (eventos emitidos por el backend)
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
+
+    listen<string>("final-transcript", (e) => {
+      const raw = voiceCommands ? applyVoicePunctuation(e.payload) : e.payload;
+      const clean = raw.trim();
+      if (!clean) return;
+      setText((prev) => {
+        const base = prev.replace(/\s+$/, "");
+        return base ? `${base} ${clean}` : clean;
+      });
+      setHasUnsavedChanges(true);
+    }).then((u) => (cancelled ? u() : unsubs.push(u)));
+
+    listen<number>("audio-level", (e) => setAudioLevel(e.payload)).then((u) =>
+      cancelled ? u() : unsubs.push(u),
+    );
+
+    return () => {
+      cancelled = true;
+      unsubs.forEach((u) => u());
+    };
+  }, [voiceCommands]);
+
+  const toggleListening = useCallback(async () => {
+    if (editorState === "listening" || editorState === "loading") {
       setEditorState("idle");
+      setAudioLevel(0);
+      try {
+        await invoke("stop_listening");
+      } catch (e) {
+        console.error(e);
+      }
+      try {
+        await invoke("stop_asr");
+      } catch (e) {
+        console.error(e);
+      }
+      return;
     }
-  };
+
+    setMicError("");
+    setEditorState("loading");
+    try {
+      await invoke("start_asr");
+      await invoke("start_listening");
+      setEditorState("listening");
+    } catch (e) {
+      setMicError(typeof e === "string" ? e : String(e));
+      setEditorState("idle");
+      try {
+        await invoke("stop_listening");
+      } catch {
+        /* noop */
+      }
+      try {
+        await invoke("stop_asr");
+      } catch {
+        /* noop */
+      }
+    }
+  }, [editorState]);
+
+  // Atajo Ctrl+Space (usa un ref para no re-suscribir en cada render)
+  const toggleRef = useRef(toggleListening);
+  useEffect(() => {
+    toggleRef.current = toggleListening;
+  }, [toggleListening]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.code === "Space") {
+        e.preventDefault();
+        toggleRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
   const charCount = text.length;
@@ -310,48 +390,98 @@ function App() {
           </div>
 
           {/* Controls */}
-          <div className="flex items-center gap-6">
-            {/* Mic Button */}
-            <button
-              onClick={toggleListening}
-              className="relative w-16 h-16 rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95"
-              style={{
-                backgroundColor:
-                  editorState === "listening"
-                    ? "var(--color-danger)"
-                    : "var(--color-accent)",
-              }}
-              title={editorState === "idle" ? "Iniciar dictado (Ctrl+Space)" : "Detener dictado"}
-            >
-              {editorState === "listening" && (
-                <span
-                  className="absolute inset-0 rounded-full animate-pulse-recording"
-                  style={{ backgroundColor: "var(--color-danger)", opacity: 0.3 }}
-                />
-              )}
-              {editorState === "idle" ? (
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                  <line x1="12" x2="12" y1="19" y2="22" />
-                </svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="6" y="6" width="12" height="12" rx="2" />
-                </svg>
-              )}
-            </button>
+          <div className="flex flex-col items-center gap-4 w-full max-w-3xl">
+            <div className="flex items-center gap-6">
+              {/* Mic Button */}
+              <button
+                onClick={toggleListening}
+                disabled={editorState === "loading"}
+                className="relative w-16 h-16 rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-70 disabled:cursor-wait"
+                style={{
+                  backgroundColor:
+                    editorState === "listening"
+                      ? "var(--color-danger)"
+                      : editorState === "loading"
+                        ? "var(--color-bg-elevated)"
+                        : "var(--color-accent)",
+                }}
+                title={
+                  editorState === "idle"
+                    ? "Iniciar dictado (Ctrl+Space)"
+                    : editorState === "loading"
+                      ? "Cargando modelo…"
+                      : "Detener dictado"
+                }
+              >
+                {editorState === "listening" && (
+                  <span
+                    className="absolute inset-0 rounded-full animate-pulse-recording"
+                    style={{ backgroundColor: "var(--color-danger)", opacity: 0.3 }}
+                  />
+                )}
+                {editorState === "idle" && (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" x2="12" y1="19" y2="22" />
+                  </svg>
+                )}
+                {editorState === "listening" && (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                )}
+                {editorState === "loading" && (
+                  <svg className="animate-spin" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-bright)" strokeWidth="2" strokeLinecap="round">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                )}
+              </button>
 
-            {/* Recording indicator */}
-            {editorState === "listening" && (
-              <div className="flex items-center gap-2">
-                <span
-                  className="w-2.5 h-2.5 rounded-full animate-pulse-recording"
-                  style={{ backgroundColor: "var(--color-success)" }}
-                />
+              {/* Recording indicator + nivel de entrada */}
+              {editorState === "listening" && (
+                <div className="flex items-center gap-3">
+                  <span
+                    className="w-2.5 h-2.5 rounded-full animate-pulse-recording"
+                    style={{ backgroundColor: "var(--color-success)" }}
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+                      Escuchando...
+                    </span>
+                    <div
+                      className="w-40 h-1.5 rounded-full overflow-hidden"
+                      style={{ backgroundColor: "var(--color-bg-elevated)" }}
+                    >
+                      <div
+                        className="h-full rounded-full transition-all duration-75"
+                        style={{
+                          width: `${Math.round(audioLevel * 100)}%`,
+                          backgroundColor: "var(--color-success)",
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {editorState === "loading" && (
                 <span className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                  Escuchando...
+                  Cargando modelo…
                 </span>
+              )}
+            </div>
+
+            {micError && (
+              <div
+                className="w-full text-xs px-3 py-2 rounded-lg border break-words"
+                style={{
+                  borderColor: "var(--color-danger)",
+                  color: "var(--color-danger)",
+                  backgroundColor: "rgba(239,68,68,0.08)",
+                }}
+              >
+                No se pudo iniciar el micrófono: {micError}
               </div>
             )}
           </div>
