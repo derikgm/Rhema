@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
 import { FileEntry } from "./components/FolderTree";
+import { SettingsPanel } from "./components/SettingsPanel";
 
 type EditorState = "idle" | "listening" | "processing";
 
@@ -278,10 +279,10 @@ function App() {
             </button>
 
             <button
-              onClick={() => setShowOptions(!showOptions)}
+              onClick={() => setShowOptions(true)}
               className="p-2 rounded-lg transition-colors hover:opacity-80"
               style={{ color: "var(--color-text-secondary)" }}
-              title="Opciones"
+              title="Ajustes"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3" />
@@ -290,44 +291,6 @@ function App() {
             </button>
           </div>
         </header>
-
-        {/* Options Panel */}
-        {showOptions && (
-          <div
-            className="px-4 md:px-6 py-4 border-b shrink-0"
-            style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-surface)" }}
-          >
-            <h2 className="text-sm font-medium mb-3" style={{ color: "var(--color-text-primary)" }}>
-              Opciones
-            </h2>
-            <div className="flex flex-col gap-3">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={voiceCommands}
-                  onChange={(e) => setVoiceCommands(e.target.checked)}
-                  className="w-4 h-4 rounded"
-                  style={{ accentColor: "var(--color-accent)" }}
-                />
-                <span className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                  Comandos de voz ("coma", "punto", "nueva línea")
-                </span>
-              </label>
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={autoSave}
-                  onChange={(e) => setAutoSave(e.target.checked)}
-                  className="w-4 h-4 rounded"
-                  style={{ accentColor: "var(--color-accent)" }}
-                />
-                <span className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                  Autoguardado cada 30 segundos
-                </span>
-              </label>
-            </div>
-          </div>
-        )}
 
         {/* Editor Area */}
         <main className="flex-1 flex flex-col items-center px-4 md:px-6 py-6 md:py-8 gap-6 overflow-y-auto">
@@ -402,6 +365,16 @@ function App() {
           </div>
         </main>
       </div>
+
+      {/* Settings Panel */}
+      <SettingsPanel
+        open={showOptions}
+        onClose={() => setShowOptions(false)}
+        voiceCommands={voiceCommands}
+        onVoiceCommandsChange={setVoiceCommands}
+        autoSave={autoSave}
+        onAutoSaveChange={setAutoSave}
+      />
     </div>
   );
 }
