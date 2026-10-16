@@ -139,25 +139,26 @@ rhema/
 
 ### Fase 1 — Captura de audio en Rust
 - [x] Añadir dependencia `cpal` para captura de micrófono multiplataforma.
-- [ ] Implementar `audio.rs`: stream de PCM 16kHz mono f32 (o i16 según
-      requiera sherpa-onnx).
-- [ ] Exponer comando `start_listening` / `stop_listening` desde Tauri.
-- [ ] Emitir evento `audio-level` al frontend para el indicador visual
+- [x] Implementar `audio.rs`: captura con `cpal`, mezcla a mono y remuestreo a
+      16 kHz f32 (el VAD de sherpa-onnx exige 16 kHz mono).
+- [x] Exponer comandos `start_listening` / `stop_listening` desde Tauri.
+- [x] Emitir evento `audio-level` al frontend para el indicador visual
       (waveform o punto pulsante).
 
 ### Fase 2 — Integración de sherpa-onnx
 - [x] Añadir `sherpa-rs` o `sherpa-onnx` al `Cargo.toml`.
-- [ ] Elegir modelo: empezar con un modelo **streaming** en español
-      (p. ej. `sherpa-onnx-streaming-zipformer-es` o similar).
-- [ ] Implementar `asr.rs`: crear VAD + recognizer, alimentar chunks de audio,
-      emitir eventos `partial-transcript` y `final-transcript` al frontend.
-- [ ] Script de descarga de modelos en `build.rs` o `scripts/download-models.sh`.
+- [ ] Elegir modelo: se usa **Dolphin** (offline, multilingüe). Pendiente evaluar
+      un modelo **streaming** en español para transcripción continua (el actual
+      entrega el texto al cerrar cada segmento de voz).
+- [x] Implementar `asr.rs`: VAD (Silero) + reconocedor en un hilo aparte; emite
+      `final-transcript` al frontend.
+- [x] Descarga/gestión de modelos desde la UI (`models.rs` + panel de Ajustes).
 - [ ] Verificar latencia: el texto parcial debe aparecer en < 500ms.
 
 ### Fase 3 — Frontend de dictado
 - [x] Componente `Editor.tsx`: `textarea` controlado por estado de React.
-- [ ] Hook `useTranscription.ts`: escuchar eventos `partial-transcript` y
-      `final-transcript` de Tauri, y aplicar la lógica de append.
+- [x] Escuchar eventos de transcripción y hacer append al editor (integrado en
+      `App.tsx`; el hook `useTranscription.ts` queda como código heredado).
 - [ ] Hook `useKeyboardPunctuation.ts`: interceptar `,` `.` `?` `!` mientras
       está en modo dictado y asegurar que se insertan correctamente.
 - [ ] Máquina de estados en `dictationMachine.ts`:
@@ -173,9 +174,9 @@ rhema/
 - [x] Autoguardado de borrador en `appDataDir/drafts/` cada 30s.
 
 ### Fase 5 — Comandos de voz
-- [ ] Post-procesador de texto que reemplace "coma", "punto", "nueva línea",
-      "signo de interrogación" por sus símbolos.
-- [ ] Hacerlo configurable (on/off) desde ajustes.
+- [x] Post-procesador de texto que reemplace "coma", "punto", "nueva línea",
+      "signo de interrogación" por sus símbolos (`postprocessPunctuation.ts`).
+- [x] Hacerlo configurable (on/off) desde ajustes.
 
 ### Fase 6 — Android
 - [ ] Configurar `build.rs` para descargar `.so` precompilado de sherpa-onnx.

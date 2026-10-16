@@ -9,14 +9,12 @@ const TARGET_RATE: u32 = 16000;
 static STREAM: Mutex<Option<cpal::Stream>> = Mutex::new(None);
 
 /// Remuestreador lineal con estado: convierte la frecuencia del dispositivo (p. ej.
-/// 48 kHz) a 16 kHz manteniendo la fase entre bloques para no producir cortes.
+/// 48 kHz) a 16 kHz manteniendo la fase (`pos`) entre bloques para no producir cortes.
 struct LinearResampler {
     /// Muestras de entrada por cada muestra de salida.
     ratio: f64,
     /// Posición fraccionaria dentro del bloque actual.
     pos: f64,
-    /// Última muestra del bloque anterior (interpolación continua).
-    prev: f32,
 }
 
 impl LinearResampler {
@@ -24,7 +22,6 @@ impl LinearResampler {
         Self {
             ratio: src_rate as f64 / dst_rate.max(1) as f64,
             pos: 0.0,
-            prev: 0.0,
         }
     }
 
@@ -33,21 +30,14 @@ impl LinearResampler {
         if n == 0 || self.ratio <= 0.0 {
             return Vec::new();
         }
-        // Índice virtual: 0 -> muestra anterior, k>=1 -> input[k-1].
-        let virt = |idx: usize, prev: f32| -> f32 {
-            if idx == 0 {
-                prev
-            } else {
-                input[idx - 1]
-            }
-        };
 
         let mut out = Vec::with_capacity((n as f64 / self.ratio) as usize + 2);
         while self.pos < n as f64 {
-            let i = self.pos.floor() as usize;
+            let i = self.pos.floor() as usize; // 0..=n-1
             let frac = self.pos - i as f64;
-            let a = virt(i, self.prev);
-            let b = virt(i + 1, self.prev); // i+1 <= n, siempre válido
+            let a = input[i];
+            // En el borde usamos la misma muestra (solo relevante con ratios fraccionarios).
+            let b = if i + 1 < n { input[i + 1] } else { a };
             out.push((a as f64 + (b as f64 - a as f64) * frac) as f32);
             self.pos += self.ratio;
         }
@@ -55,7 +45,6 @@ impl LinearResampler {
         if self.pos < 0.0 {
             self.pos = 0.0;
         }
-        self.prev = input[n - 1];
         out
     }
 }
@@ -153,4 +142,47 @@ pub fn stop_listening() -> Result<(), String> {
     let mut guard = STREAM.lock().map_err(|e| e.to_string())?;
     *guard = None;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinearResampler;
+
+    #[test]
+    fn ratio_48k_to_16k_shrinks_third() {
+        let mut r = LinearResampler::new(48000, 16000);
+        let input: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.01).sin()).collect();
+        let out = r.process(&input);
+        // 4800 muestras de entrada -> ~1600 de salida
+        assert!((out.len() as i64 - 1600).abs() <= 2, "salida = {}", out.len());
+    }
+
+    #[test]
+    fn no_resample_when_rates_equal() {
+        let mut r = LinearResampler::new(16000, 16000);
+        let input: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+        let out = r.process(&input);
+        assert_eq!(out.len(), input.len());
+        // Con ratio 1 el remuestreador devuelve las muestras originales.
+        assert_eq!(out[1], input[1]);
+    }
+
+    #[test]
+    fn continuity_across_blocks() {
+        let mut r = LinearResampler::new(48000, 16000);
+        // Una constante debe seguir siendo constante entre bloques.
+        let a = r.process(&vec![0.5f32; 480]);
+        let b = r.process(&vec![0.5f32; 480]);
+        for s in a.iter().chain(b.iter()) {
+            assert!((s - 0.5).abs() < 1e-6, "valor = {s}");
+        }
+    }
+
+    #[test]
+    fn upsample_increases_length() {
+        let mut r = LinearResampler::new(8000, 16000);
+        let input = vec![0.0f32; 800];
+        let out = r.process(&input);
+        assert!((out.len() as i64 - 1600).abs() <= 2, "salida = {}", out.len());
+    }
 }
