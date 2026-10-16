@@ -1,10 +1,13 @@
-use sherpa_rs::dolphin::{DolphinConfig, DolphinRecognizer};
+use crate::whisper_es::WhisperRecognizer;
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Idioma fijado para la transcripción.
+const LANGUAGE: &str = "es";
 
 /// Sesión de reconocimiento activa.
 ///
@@ -17,9 +20,40 @@ struct Session {
 
 static STATE: Mutex<Option<Session>> = Mutex::new(None);
 
-/// Busca el directorio que contiene `silero_vad.onnx`, `tokens.txt` y el modelo ONNX.
-/// Prueba varias ubicaciones (datos de la app, recursos, CWD de desarrollo, junto al binario).
-fn resolve_model_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+/// Busca en `root` y sus subdirectorios (profundidad limitada) un archivo cuyo
+/// nombre cumple `pred`.
+fn find_file(root: &Path, depth: u32, pred: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
+    if depth > 2 {
+        return None;
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, depth + 1, pred) {
+                return Some(found);
+            }
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if pred(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Localiza el VAD, el encoder/decoder de Whisper y sus tokens en varios
+/// directorios candidatos (datos de la app, recursos, CWD de desarrollo,
+/// junto al binario).
+struct ModelPaths {
+    vad: PathBuf,
+    encoder: PathBuf,
+    decoder: PathBuf,
+    tokens: PathBuf,
+}
+
+fn resolve_model_paths(app: &AppHandle) -> Result<ModelPaths, String> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(d) = app.path().app_data_dir() {
         dirs.push(d.join("models"));
@@ -32,60 +66,64 @@ fn resolve_model_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), S
         dirs.push(cwd.join("src-tauri").join("models"));
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(p) = exe.parent() {
-            dirs.push(p.join("models"));
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("models"));
         }
     }
+
+    let is_encoder = |n: &str| n.contains("encoder") && n.ends_with(".onnx");
+    let is_decoder = |n: &str| n.contains("decoder") && n.ends_with(".onnx");
+    let is_vad = |n: &str| n == "silero_vad.onnx";
+    let is_tokens = |n: &str| n.ends_with("tokens.txt");
 
     for dir in &dirs {
-        let vad = dir.join("silero_vad.onnx");
-        let tokens = dir.join("tokens.txt");
-        if !vad.exists() || !tokens.exists() {
+        // El encoder/decoder identifica la carpeta del modelo Whisper.
+        let Some(encoder) = find_file(dir, 0, &is_encoder) else {
             continue;
-        }
+        };
+        let Some(decoder) = find_file(dir, 0, &is_decoder) else {
+            continue;
+        };
+        let Some(vad) = find_file(dir, 0, &is_vad) else {
+            continue;
+        };
+        // Los tokens deben ser los del propio Whisper (su orden de vocabulario
+        // no es intercambiable con los de otro modelo).
+        let encoder_dir = encoder.parent().unwrap_or(dir);
+        let Some(tokens) = find_file(encoder_dir, 0, &is_tokens)
+            .or_else(|| find_file(dir, 0, &is_tokens))
+        else {
+            continue;
+        };
 
-        // Localiza el modelo acústico: preferimos model.int8.onnx, si no,
-        // cualquier .onnx que no sea el VAD.
-        let mut model = dir.join("model.int8.onnx");
-        if !model.exists() {
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    let is_onnx = p.extension().and_then(|x| x.to_str()) == Some("onnx");
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if is_onnx && name != "silero_vad.onnx" {
-                        model = p;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if model.exists() {
-            return Ok((vad, model, tokens));
-        }
+        return Ok(ModelPaths {
+            vad,
+            encoder,
+            decoder,
+            tokens,
+        });
     }
 
-    Err("No se encontró el modelo. Descárgalo en Ajustes › Modelos.".to_string())
+    Err("No se encontró el modelo Whisper. Descárgalo en Ajustes › Modelos.".to_string())
 }
 
 /// Carga el modelo y arranca el hilo trabajador de transcripción.
 pub fn start_session(app: AppHandle) -> Result<(), String> {
-    let (vad_path, model_path, tokens_path) = resolve_model_paths(&app)?;
+    let paths = resolve_model_paths(&app)?;
 
     let mut vad_cfg = SileroVadConfig::default();
-    vad_cfg.model = vad_path.to_string_lossy().to_string();
+    vad_cfg.model = paths.vad.to_string_lossy().to_string();
     vad_cfg.sample_rate = 16000;
     // El valor por defecto de sherpa-rs (0.5 s) corta el habla en trozos diminutos.
     vad_cfg.max_speech_duration = 20.0;
     let vad = SileroVad::new(vad_cfg, 30.0).map_err(|e| e.to_string())?;
 
-    let rec_cfg = DolphinConfig {
-        model: model_path.to_string_lossy().to_string(),
-        tokens: tokens_path.to_string_lossy().to_string(),
-        ..Default::default()
-    };
-    let mut recognizer = DolphinRecognizer::new(rec_cfg).map_err(|e| e.to_string())?;
+    let mut recognizer = WhisperRecognizer::new(
+        &paths.encoder.to_string_lossy(),
+        &paths.decoder.to_string_lossy(),
+        &paths.tokens.to_string_lossy(),
+        LANGUAGE,
+    )?;
 
     // Hilo trabajador: posee el reconocedor y transcribe los segmentos recibidos.
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
