@@ -41,7 +41,7 @@ export default function ModelPicker() {
   async function download(m: ModelInfo) {
     setStatus(`Descargando ${m.name}...`);
     try {
-      const path = await invoke<string>("download_model", { url: m.url, filename: m.filename });
+      const path = await invoke<string>("download_model", { id: m.id });
       setStatus(`Descargado en ${path}`);
     } catch (e) {
       setStatus(`Error: ${String(e)}`);

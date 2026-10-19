@@ -2,13 +2,18 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+interface ModelFile {
+  url: string;
+  filename: string;
+  size_mb: number;
+}
+
 interface ModelStatus {
   id: string;
   name: string;
   language: string;
   streaming: boolean;
-  url: string;
-  filename: string;
+  files: ModelFile[];
   size_mb: number;
   downloaded: boolean;
   active: boolean;
@@ -115,13 +120,10 @@ export function SettingsPanel({
   }, []);
 
   const handleDownload = async (m: ModelStatus) => {
-    setBusy(m.filename);
+    setBusy(m.id);
     setMessage(`Descargando ${m.name}…`);
     try {
-      const path = await invoke<string>("download_model", {
-        url: m.url,
-        filename: m.filename,
-      });
+      const path = await invoke<string>("download_model", { id: m.id });
       setMessage(`Descargado en ${path}`);
       await loadModels();
     } catch (e) {
@@ -132,9 +134,9 @@ export function SettingsPanel({
   };
 
   const handleDelete = async (m: ModelStatus) => {
-    setBusy(m.filename);
+    setBusy(m.id);
     try {
-      await invoke("delete_model", { filename: m.filename });
+      await invoke("delete_model", { id: m.id });
       setMessage(`Modelo ${m.name} eliminado.`);
       if (activeModel === m.id) setActiveModel(null);
       await loadModels();
@@ -214,10 +216,14 @@ export function SettingsPanel({
               )}
 
               {models.map((m) => {
-                const p = progress[m.filename];
-                const pct = p && p.total_mb > 0 ? Math.min(100, (p.downloaded_mb / p.total_mb) * 100) : 0;
+                // Progreso agregado de todos los archivos del modelo.
+                const parts = m.files.map((f) => progress[f.filename]).filter(Boolean);
+                const downloadedMb = parts.reduce((s, p) => s + p.downloaded_mb, 0);
+                const totalMb = parts.reduce((s, p) => s + p.total_mb, 0);
+                const pct = totalMb > 0 ? Math.min(100, (downloadedMb / totalMb) * 100) : 0;
+                const downloading = parts.length > 0 && parts.some((p) => !p.done);
                 const isActive = activeModel === m.id;
-                const isBusy = busy === m.filename;
+                const isBusy = busy === m.id;
 
                 return (
                   <div
@@ -295,7 +301,7 @@ export function SettingsPanel({
                       </div>
                     </div>
 
-                    {p && !p.done && (
+                    {downloading && (
                       <div className="mt-3">
                         <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: "var(--color-bg-surface)" }}>
                           <div
@@ -304,7 +310,7 @@ export function SettingsPanel({
                           />
                         </div>
                         <div className="text-[11px] mt-1 text-right" style={{ color: "var(--color-text-secondary)" }}>
-                          {p.downloaded_mb.toFixed(1)} / {p.total_mb.toFixed(1)} MB ({pct.toFixed(0)}%)
+                          {downloadedMb.toFixed(1)} / {totalMb.toFixed(1)} MB ({pct.toFixed(0)}%)
                         </div>
                       </div>
                     )}

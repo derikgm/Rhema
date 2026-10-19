@@ -45,18 +45,13 @@ pub fn list_models(app: AppHandle) -> Vec<ModelStatus> {
 }
 
 #[tauri::command]
-pub fn download_model(app: AppHandle, url: String, filename: String) -> Result<String, String> {
-    let total_mb = models::catalog()
-        .iter()
-        .find(|m| m.filename == filename)
-        .map(|m| m.size_mb)
-        .unwrap_or(0.0);
-    models::download_model(&app, &url, &filename, total_mb)
+pub fn download_model(app: AppHandle, id: String) -> Result<String, String> {
+    models::download_model(&app, &id)
 }
 
 #[tauri::command]
-pub fn delete_model(app: AppHandle, filename: String) -> Result<(), String> {
-    models::delete_model(&app, &filename)
+pub fn delete_model(app: AppHandle, id: String) -> Result<(), String> {
+    models::delete_model(&app, &id)
 }
 
 #[tauri::command]

@@ -8,7 +8,7 @@
 //! correctamos a 80, además de poder forzar el idioma.
 
 use sherpa_rs::get_default_provider;
-use sherpa_rs_sys as sys;
+use sherpa_rs::sherpa_rs_sys as sys;
 use std::ffi::{c_char, CStr, CString};
 
 pub struct WhisperRecognizer {
@@ -37,63 +37,36 @@ impl WhisperRecognizer {
         let language_c = c(language)?;
         let task_c = c("transcribe")?;
         let decoding_method_c = c("greedy_search")?;
+        // sherpa-rs pasa una cadena vacía (no null) en `bpe_vocab`; con null el
+        // C++ la interpreta como std::string y lanza una excepción.
         let empty_c = c("")?;
 
         let num_threads: i32 = 2;
 
-        // SAFETY: construimos la configuración C que sherpa-onnx consume de
-        // forma síncrona en `SherpaOnnxCreateOfflineRecognizer`; todas las
-        // cadenas viven hasta después de esa llamada.
-        let model_config = unsafe {
-            sys::SherpaOnnxOfflineModelConfig {
-                whisper: sys::SherpaOnnxOfflineWhisperModelConfig {
-                    decoder: decoder_c.as_ptr(),
-                    encoder: encoder_c.as_ptr(),
-                    language: language_c.as_ptr(),
-                    task: task_c.as_ptr(),
-                    tail_paddings: 0,
-                },
-                debug: 0,
-                num_threads,
-                provider: provider_c.as_ptr(),
-                tokens: tokens_c.as_ptr(),
-                bpe_vocab: empty_c.as_ptr(),
-
-                // Campos de otros tipos de modelo: no los usamos.
-                model_type: std::ptr::null(),
-                modeling_unit: std::ptr::null(),
-                nemo_ctc: std::ptr::null(),
-                paraformer: std::ptr::null(),
-                tdnn: std::ptr::null(),
-                telespeech_ctc: std::ptr::null(),
-                transducer: std::ptr::null(),
-                fire_red_asr: std::ptr::null(),
-                sense_voice: std::ptr::null(),
-                moonshine: std::ptr::null(),
-                dolphin: std::ptr::null(),
-                zipformer_ctc: std::ptr::null(),
-                canary: std::ptr::null(),
-            }
+        // SAFETY: `SherpaOnnxOfflineModelConfig` y
+        // `SherpaOnnxOfflineRecognizerConfig` son structs `repr(C)` de punteros
+        // y enteros; todo a cero es una representación válida (punteros null =
+        // modelos no usados). Sobrescribimos después solo los campos de Whisper.
+        let mut model_config: sys::SherpaOnnxOfflineModelConfig = unsafe { std::mem::zeroed() };
+        model_config.whisper = sys::SherpaOnnxOfflineWhisperModelConfig {
+            decoder: decoder_c.as_ptr(),
+            encoder: encoder_c.as_ptr(),
+            language: language_c.as_ptr(),
+            task: task_c.as_ptr(),
+            tail_paddings: 0,
         };
+        model_config.tokens = tokens_c.as_ptr();
+        model_config.num_threads = num_threads;
+        model_config.provider = provider_c.as_ptr();
+        model_config.bpe_vocab = empty_c.as_ptr();
 
-        let config = unsafe {
-            sys::SherpaOnnxOfflineRecognizerConfig {
-                decoding_method: decoding_method_c.as_ptr(),
-                model_config,
-                // 80 filtros mel: lo que espera Whisper.
-                feat_config: sys::SherpaOnnxFeatureConfig {
-                    sample_rate: 16000,
-                    feature_dim: 80,
-                },
-                hotwords_file: std::ptr::null(),
-                hotwords_score: 0.0,
-                lm_config: std::ptr::null(),
-                max_active_paths: 0,
-                rule_fars: std::ptr::null(),
-                rule_fsts: std::ptr::null(),
-                blank_penalty: 0.0,
-                hr: std::ptr::null(),
-            }
+        let mut config: sys::SherpaOnnxOfflineRecognizerConfig = unsafe { std::mem::zeroed() };
+        config.model_config = model_config;
+        config.decoding_method = decoding_method_c.as_ptr();
+        // 80 filtros mel: lo que espera Whisper.
+        config.feat_config = sys::SherpaOnnxFeatureConfig {
+            sample_rate: 16000,
+            feature_dim: 80,
         };
 
         let recognizer = unsafe { sys::SherpaOnnxCreateOfflineRecognizer(&config) };

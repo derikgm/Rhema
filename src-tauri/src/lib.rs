@@ -2,7 +2,7 @@ mod asr;
 mod audio;
 mod commands;
 mod models;
-mod whisper_es;
+pub mod whisper_es;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
