@@ -12,7 +12,6 @@ const LANGUAGE: &str = "es";
 
 /// Sesión de reconocimiento activa.
 struct Session {
-    vad: SileroVad,
     tx: Sender<Vec<f32>>,
 }
 
@@ -49,38 +48,40 @@ pub fn start_session(app: AppHandle) -> Result<(), String> {
 
     let paths = resolve_model_paths(&app)?;
 
-    // Configurar VAD
-    let mut vad_config = SileroVadConfig::default();
-    vad_config.model = paths.vad.to_string_lossy().to_string();
-    vad_config.sample_rate = 16000;
-    vad_config.window_size = 512;
-    // Umbrales un poco más permisivos para español conversacional
-    vad_config.threshold = 0.5;
-    vad_config.min_silence_duration = 0.25;
-    vad_config.min_speech_duration = 0.25;
-    vad_config.max_speech_duration = 30.0;
-
-    let mut vad = SileroVad::new(vad_config, 16000)
-        .map_err(|e| format!("Error inicializando Silero VAD: {e}"))?;
-
     // Canal para enviar chunks de audio desde el hilo de captura
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
 
-    // Guardar sesión
+    // Guardar sesión con canal
     {
         let mut guard = STATE.lock().unwrap();
-        *guard = Some(Session { vad, tx: tx.clone() });
+        *guard = Some(Session { tx: tx.clone() });
     }
-
     // Hilo de reconocimiento
     let app_handle = app.clone();
+    let paths_clone = paths;
     thread::spawn(move || {
+        // Inicializar VAD
+        let mut vad_config = SileroVadConfig::default();
+        vad_config.model = paths_clone.vad.to_string_lossy().to_string();
+        vad_config.sample_rate = 16000;
+        vad_config.window_size = 512;
+        vad_config.threshold = 0.5;
+        vad_config.min_silence_duration = 0.25;
+        vad_config.min_speech_duration = 0.25;
+        vad_config.max_speech_duration = 30.0;
+        let mut vad_thread = match SileroVad::new(vad_config, 16000.0) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = app_handle.emit("asr-error", format!("Error inicializando Silero VAD: {e}"));
+                return;
+            }
+        };
         // Inicializar reconocedor Whisper
         let mut recognizer = match WhisperRecognizer::new(
-            paths.encoder.to_string_lossy().to_string(),
-            paths.decoder.to_string_lossy().to_string(),
-            paths.tokens.to_string_lossy().to_string(),
-            LANGUAGE.to_string(),
+            &paths_clone.encoder.to_string_lossy(),
+            &paths_clone.decoder.to_string_lossy(),
+            &paths_clone.tokens.to_string_lossy(),
+            LANGUAGE,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -91,44 +92,29 @@ pub fn start_session(app: AppHandle) -> Result<(), String> {
 
         // Procesar chunks
         while let Ok(chunk) = rx.recv() {
-            // Feed VAD
-            // SileroVad::accept_waveform espera f32 a 16kHz
-            // Nota: la API de sherpa-rs puede variar; usamos el enfoque estándar
-            // Insertamos chunk en VAD
-            // (sherpa_rs expone métodos; asumimos accept_waveform)
-            let _ = vad.accept_waveform(&chunk);
-            while vad.is_speech() {
-                let _ = vad.pop();
+            let _ = vad_thread.accept_waveform(chunk.clone());
+            while vad_thread.is_speech() {
+                let _ = vad_thread.pop();
             }
-            // Extraer segmentos de voz completados
             loop {
-                let speech = vad.front();
-                if speech.is_empty() {
+                let speech = vad_thread.front();
+                let samples: Vec<f32> = speech.samples.clone();
+                if samples.is_empty() {
                     break;
                 }
-                // speech.samples es el segmento
-                let samples: Vec<f32> = speech.samples.clone();
-                let _ = vad.pop();
+                let _ = vad_thread.pop();
                 if samples.is_empty() {
                     continue;
                 }
-                // Transcribir segmento
-                match recognizer.transcribe(&samples, 16000) {
-                    Ok(text) => {
-                        if !text.is_empty() {
-                            let _ = app_handle.emit("asr-result", text);
-                        }
-                    }
-                    Err(e) => {
-                        let _ = app_handle.emit("asr-error", format!("Error transcribiendo: {e}"));
-                    }
+                let result = recognizer.transcribe(16000, &samples);
+                if !result.text.is_empty() {
+                    let _ = app_handle.emit("asr-result", result.text);
                 }
             }
         }
     });
 
-    // Iniciar captura de audio
-    crate::audio::start_asr_capture(app.clone(), tx)
+    crate::audio::start_listening(app.clone()).map_err(|e| e.to_string())
 }
 
 /// Acepta muestras de audio desde el hilo de captura (llamado por audio.rs)

@@ -94,7 +94,7 @@ where
                 }
 
                 let resampled = resampler.process(&mono);
-                crate::asr::accept_samples(&resampled);
+                crate::asr::accept_samples(resampled);
             },
             |err| eprintln!("Error en el stream de audio: {err}"),
             None,
