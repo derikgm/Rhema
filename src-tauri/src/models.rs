@@ -362,6 +362,8 @@ fn download_file(
     let mut child = Command::new("curl")
         .arg("-L")
         .arg("--fail")
+        .arg("--silent")
+        .arg("--show-error")
         .arg("-o")
         .arg(dest_path)
         .arg(url)
@@ -488,6 +490,34 @@ pub fn import_model_files(app: &AppHandle, paths: Vec<String>) -> Result<LocalMo
     }
     if let Some(v) = vad {
         let _ = cp_file(&v, &mdir.join("silero_vad.onnx"));
+    } else {
+        // Intentar copiar desde otro modelo existente
+        let mut copied_vad = false;
+        if let Ok(rd) = fs::read_dir(&root) {
+            for e in rd.flatten() {
+                let pdir = e.path();
+                if pdir.is_dir() && pdir != mdir {
+                    let vad_src = pdir.join("silero_vad.onnx");
+                    if vad_src.exists() {
+                        let _ = cp_file(&vad_src, &mdir.join("silero_vad.onnx"));
+                        copied_vad = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !copied_vad {
+            // Descargar silero_vad.onnx
+            const VAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
+            let vad_dst = mdir.join("silero_vad.onnx");
+            let _ = Command::new("curl")
+                .arg("-L")
+                .arg("--fail")
+                .arg("-o")
+                .arg(&vad_dst)
+                .arg(VAD_URL)
+                .status();
+        }
     }
     let mut cfg = load_config(app);
     let folder_name_final = mdir

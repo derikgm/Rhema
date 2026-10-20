@@ -49,6 +49,15 @@ interface SettingsPanelProps {
   onAutoSaveChange: (v: boolean) => void;
 }
 
+function Spinner() {
+  return (
+    <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+  );
+}
+
 function Toggle({
   checked,
   onChange,
@@ -183,7 +192,9 @@ export function SettingsPanel({
         return;
       }
       setBusy("import");
-      setMessage("Importando modelo...");
+      setMessage("IMPORTANDO... Copiando archivos al directorio de modelos");
+      // Pequeño delay para permitir renderizar
+      await new Promise((r) => setTimeout(r, 50));
       await invoke("import_model_files", { paths });
       setMessage("Modelo importado correctamente");
       await loadAll();
@@ -232,8 +243,9 @@ export function SettingsPanel({
             <div className="flex items-center justify-between mb-1">
               <h3 className="text-sm font-semibold" style={{ color: "var(--color-text-primary)" }}>Modelos de reconocimiento</h3>
               <div className="flex gap-2">
-                <button onClick={handleImport} disabled={busy === "import"} className="text-xs px-2.5 py-1 rounded hover:opacity-80" style={{ backgroundColor: "var(--color-bg-elevated)", color: "var(--color-text-secondary)" }}>
-                  {busy === "import" ? "Importando..." : "Importar"}
+                <button onClick={handleImport} disabled={busy === "import"} className="text-xs px-2.5 py-1 rounded hover:opacity-80 flex items-center gap-1.5" style={{ backgroundColor: "var(--color-bg-elevated)", color: "var(--color-text-secondary)" }}>
+                  {busy === "import" && <Spinner />}
+                  {busy === "import" ? "IMPORTANDO..." : "Importar"}
                 </button>
                 <button onClick={loadAll} className="text-xs px-2.5 py-1 rounded hover:opacity-80" style={{ backgroundColor: "var(--color-bg-elevated)", color: "var(--color-text-secondary)" }}>
                   Actualizar
@@ -247,7 +259,6 @@ export function SettingsPanel({
             <div className="space-y-3">
               {catalog.map((m) => {
                 const downloaded = downloadedFolders.has(m.folder_name);
-                const local = localModels.find((l) => l.folder_name === m.folder_name);
                 const isActive = activeFolder === m.folder_name;
                 const isBusy = busy === m.id;
                 const parts = m.files.map((f) => progress[f.filename]).filter(Boolean);
@@ -297,11 +308,6 @@ export function SettingsPanel({
                         <div className="text-[11px] mt-1 text-right" style={{ color: "var(--color-text-secondary)" }}>
                           {downloadedMb.toFixed(1)} / {totalMb.toFixed(1)} MB ({pct.toFixed(0)}%)
                         </div>
-                      </div>
-                    )}
-                    {local && !local.complete && (
-                      <div className="text-[11px] mt-2" style={{ color: "var(--color-danger)" }}>
-                        Archivos incompletos en esta carpeta
                       </div>
                     )}
                   </div>
@@ -369,8 +375,9 @@ export function SettingsPanel({
         </div>
 
         {message && (
-          <div className="px-6 py-3 shrink-0 border-t text-xs" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
-            {message}
+          <div className="px-6 py-3 shrink-0 border-t text-xs flex items-center gap-2" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
+            {busy === "import" && <Spinner />}
+            <span>{message}</span>
           </div>
         )}
       </div>
