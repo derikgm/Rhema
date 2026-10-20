@@ -2,10 +2,10 @@ use crate::models;
 use crate::whisper_es::WhisperRecognizer;
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::thread;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 /// Idioma fijado para la transcripción.
 const LANGUAGE: &str = "es";
@@ -17,6 +17,7 @@ struct Session {
 
 static STATE: Mutex<Option<Session>> = Mutex::new(None);
 
+#[derive(Clone)]
 struct ModelPaths {
     vad: PathBuf,
     encoder: PathBuf,
@@ -47,15 +48,14 @@ pub fn start_session(app: AppHandle) -> Result<(), String> {
     }
 
     let paths = resolve_model_paths(&app)?;
-
-    // Canal para enviar chunks de audio desde el hilo de captura
-    let (tx, rx) = mpsc::channel::<Vec<f32>>();
+    let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
 
     // Guardar sesión con canal
     {
         let mut guard = STATE.lock().unwrap();
         *guard = Some(Session { tx: tx.clone() });
     }
+
     // Hilo de reconocimiento
     let app_handle = app.clone();
     let paths_clone = paths;
@@ -92,24 +92,29 @@ pub fn start_session(app: AppHandle) -> Result<(), String> {
 
         // Procesar chunks
         while let Ok(chunk) = rx.recv() {
-            let _ = vad_thread.accept_waveform(chunk.clone());
+            if chunk.is_empty() {
+                continue;
+            }
+            let _ = vad_thread.accept_waveform(chunk);
             while vad_thread.is_speech() {
                 let _ = vad_thread.pop();
             }
             loop {
                 let speech = vad_thread.front();
-                let samples: Vec<f32> = speech.samples.clone();
-                if samples.is_empty() {
+                if speech.samples.is_empty() {
                     break;
                 }
+                let samples: Vec<f32> = speech.samples.clone();
                 let _ = vad_thread.pop();
                 if samples.is_empty() {
                     continue;
                 }
                 let result = recognizer.transcribe(16000, &samples);
-                if !result.text.is_empty() {
-                    let _ = app_handle.emit("asr-result", result.text);
+                if !result.text.trim().is_empty() {
+                    let _ = app_handle.emit("asr-result", result.text.trim().to_string());
                 }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                break;
             }
         }
     });
