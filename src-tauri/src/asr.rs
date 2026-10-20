@@ -1,6 +1,7 @@
+use crate::models;
 use crate::whisper_es::WhisperRecognizer;
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
@@ -10,9 +11,6 @@ use tauri::{AppHandle, Emitter, Manager};
 const LANGUAGE: &str = "es";
 
 /// Sesión de reconocimiento activa.
-///
-/// El VAD corre en el hilo de audio (rápido) y envía cada segmento de voz a un
-/// hilo trabajador que posee el reconocedor (lento), para no bloquear la captura.
 struct Session {
     vad: SileroVad,
     tx: Sender<Vec<f32>>,
@@ -20,32 +18,6 @@ struct Session {
 
 static STATE: Mutex<Option<Session>> = Mutex::new(None);
 
-/// Busca en `root` y sus subdirectorios (profundidad limitada) un archivo cuyo
-/// nombre cumple `pred`.
-fn find_file(root: &Path, depth: u32, pred: &dyn Fn(&str) -> bool) -> Option<PathBuf> {
-    if depth > 2 {
-        return None;
-    }
-    let entries = std::fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file(&path, depth + 1, pred) {
-                return Some(found);
-            }
-            continue;
-        }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if pred(name) {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// Localiza el VAD, el encoder/decoder de Whisper y sus tokens en varios
-/// directorios candidatos (datos de la app, recursos, CWD de desarrollo,
-/// junto al binario).
 struct ModelPaths {
     vad: PathBuf,
     encoder: PathBuf,
@@ -53,137 +25,123 @@ struct ModelPaths {
     tokens: PathBuf,
 }
 
+/// Localiza los archivos del modelo activo (carpeta seleccionada en Ajustes).
 fn resolve_model_paths(app: &AppHandle) -> Result<ModelPaths, String> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(d) = app.path().app_data_dir() {
-        dirs.push(d.join("models"));
-    }
-    if let Ok(d) = app.path().resource_dir() {
-        dirs.push(d.join("models"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd.join("models"));
-        dirs.push(cwd.join("src-tauri").join("models"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            dirs.push(parent.join("models"));
-        }
-    }
-
-    let is_encoder = |n: &str| n.contains("encoder") && n.ends_with(".onnx");
-    let is_decoder = |n: &str| n.contains("decoder") && n.ends_with(".onnx");
-    let is_vad = |n: &str| n == "silero_vad.onnx";
-    let is_tokens = |n: &str| n.ends_with("tokens.txt");
-
-    for dir in &dirs {
-        // El encoder/decoder identifica la carpeta del modelo Whisper.
-        let Some(encoder) = find_file(dir, 0, &is_encoder) else {
-            continue;
-        };
-        let Some(decoder) = find_file(dir, 0, &is_decoder) else {
-            continue;
-        };
-        let Some(vad) = find_file(dir, 0, &is_vad) else {
-            continue;
-        };
-        // Los tokens deben ser los del propio Whisper (su orden de vocabulario
-        // no es intercambiable con los de otro modelo).
-        let encoder_dir = encoder.parent().unwrap_or(dir);
-        let Some(tokens) = find_file(encoder_dir, 0, &is_tokens)
-            .or_else(|| find_file(dir, 0, &is_tokens))
-        else {
-            continue;
-        };
-
-        return Ok(ModelPaths {
-            vad,
-            encoder,
-            decoder,
-            tokens,
-        });
-    }
-
-    Err("No se encontró el modelo Whisper. Descárgalo en Ajustes › Modelos.".to_string())
+    let folder = models::active_model_folder_path(app).ok_or_else(|| {
+        "No hay ningún modelo activo. Descarga o importa uno en Ajustes › Modelos.".to_string()
+    })?;
+    let mf = models::resolve_model_files_in_folder(&folder)?;
+    Ok(ModelPaths {
+        vad: mf.vad,
+        encoder: mf.encoder,
+        decoder: mf.decoder,
+        tokens: mf.tokens,
+    })
 }
 
-/// Carga el modelo y arranca el hilo trabajador de transcripción.
+/// Inicia una sesión de ASR con VAD + Whisper.
 pub fn start_session(app: AppHandle) -> Result<(), String> {
+    // Detener sesión previa si existe
+    {
+        let mut guard = STATE.lock().unwrap();
+        *guard = None;
+    }
+
     let paths = resolve_model_paths(&app)?;
 
-    let mut vad_cfg = SileroVadConfig::default();
-    vad_cfg.model = paths.vad.to_string_lossy().to_string();
-    vad_cfg.sample_rate = 16000;
-    // El valor por defecto de sherpa-rs (0.5 s) corta el habla en trozos diminutos.
-    vad_cfg.max_speech_duration = 20.0;
-    let vad = SileroVad::new(vad_cfg, 30.0).map_err(|e| e.to_string())?;
+    // Configurar VAD
+    let mut vad_config = SileroVadConfig::default();
+    vad_config.model = paths.vad.to_string_lossy().to_string();
+    vad_config.sample_rate = 16000;
+    vad_config.window_size = 512;
+    // Umbrales un poco más permisivos para español conversacional
+    vad_config.threshold = 0.5;
+    vad_config.min_silence_duration = 0.25;
+    vad_config.min_speech_duration = 0.25;
+    vad_config.max_speech_duration = 30.0;
 
-    let mut recognizer = WhisperRecognizer::new(
-        &paths.encoder.to_string_lossy(),
-        &paths.decoder.to_string_lossy(),
-        &paths.tokens.to_string_lossy(),
-        LANGUAGE,
-    )?;
+    let mut vad = SileroVad::new(vad_config, 16000)
+        .map_err(|e| format!("Error inicializando Silero VAD: {e}"))?;
 
-    // Hilo trabajador: posee el reconocedor y transcribe los segmentos recibidos.
+    // Canal para enviar chunks de audio desde el hilo de captura
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let worker_app = app.clone();
+
+    // Guardar sesión
+    {
+        let mut guard = STATE.lock().unwrap();
+        *guard = Some(Session { vad, tx: tx.clone() });
+    }
+
+    // Hilo de reconocimiento
+    let app_handle = app.clone();
     thread::spawn(move || {
-        while let Ok(samples) = rx.recv() {
-            if samples.is_empty() {
-                continue;
+        // Inicializar reconocedor Whisper
+        let mut recognizer = match WhisperRecognizer::new(
+            paths.encoder.to_string_lossy().to_string(),
+            paths.decoder.to_string_lossy().to_string(),
+            paths.tokens.to_string_lossy().to_string(),
+            LANGUAGE.to_string(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = app_handle.emit("asr-error", format!("Error inicializando Whisper: {e}"));
+                return;
             }
-            let res = recognizer.transcribe(16000, &samples);
-            let text = res.text.trim().to_string();
-            if !text.is_empty() {
-                let _ = worker_app.emit("final-transcript", text);
+        };
+
+        // Procesar chunks
+        while let Ok(chunk) = rx.recv() {
+            // Feed VAD
+            // SileroVad::accept_waveform espera f32 a 16kHz
+            // Nota: la API de sherpa-rs puede variar; usamos el enfoque estándar
+            // Insertamos chunk en VAD
+            // (sherpa_rs expone métodos; asumimos accept_waveform)
+            let _ = vad.accept_waveform(&chunk);
+            while vad.is_speech() {
+                let _ = vad.pop();
+            }
+            // Extraer segmentos de voz completados
+            loop {
+                let speech = vad.front();
+                if speech.is_empty() {
+                    break;
+                }
+                // speech.samples es el segmento
+                let samples: Vec<f32> = speech.samples.clone();
+                let _ = vad.pop();
+                if samples.is_empty() {
+                    continue;
+                }
+                // Transcribir segmento
+                match recognizer.transcribe(&samples, 16000) {
+                    Ok(text) => {
+                        if !text.is_empty() {
+                            let _ = app_handle.emit("asr-result", text);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = app_handle.emit("asr-error", format!("Error transcribiendo: {e}"));
+                    }
+                }
             }
         }
     });
 
-    let mut guard = STATE.lock().map_err(|e| e.to_string())?;
-    *guard = Some(Session { vad, tx });
-    Ok(())
+    // Iniciar captura de audio
+    crate::audio::start_asr_capture(app.clone(), tx)
 }
 
-/// Entrega muestras de audio (16 kHz, mono, f32) al VAD.
-/// Cada segmento de voz detectado se reenvía al hilo trabajador.
-pub fn accept_samples(samples: &[f32]) {
-    if samples.is_empty() {
-        return;
-    }
-    let mut guard = match STATE.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    let Some(st) = guard.as_mut() else {
-        return;
-    };
-
-    st.vad.accept_waveform(samples.to_vec());
-
-    while !st.vad.is_empty() {
-        let seg = st.vad.front();
-        st.vad.pop(); // imprescindible: si no, el bucle nunca termina
-        if !seg.samples.is_empty() {
-            let _ = st.tx.send(seg.samples);
+/// Acepta muestras de audio desde el hilo de captura (llamado por audio.rs)
+pub fn accept_samples(samples: Vec<f32>) {
+    if let Ok(guard) = STATE.lock() {
+        if let Some(ref session) = *guard {
+            let _ = session.tx.send(samples);
         }
     }
 }
 
-/// Vacía el segmento pendiente y detiene la sesión (el hilo trabajador termina
-/// al soltarse el `Sender`).
+/// Detiene la sesión de ASR
 pub fn stop_session() {
-    if let Ok(mut guard) = STATE.lock() {
-        if let Some(mut st) = guard.take() {
-            st.vad.flush();
-            while !st.vad.is_empty() {
-                let seg = st.vad.front();
-                st.vad.pop();
-                if !seg.samples.is_empty() {
-                    let _ = st.tx.send(seg.samples);
-                }
-            }
-        }
-    }
+    let mut guard = STATE.lock().unwrap();
+    *guard = None;
 }

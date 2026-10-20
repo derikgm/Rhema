@@ -1,9 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::models::{self, ModelStatus};
+use crate::models;
 
 // =====================================================================
 // Audio / ASR
@@ -40,8 +39,13 @@ pub fn stop_asr() -> Result<(), String> {
 // =====================================================================
 
 #[tauri::command]
-pub fn list_models(app: AppHandle) -> Vec<ModelStatus> {
-    models::status_list(&app)
+pub fn list_models(app: AppHandle) -> Vec<models::LocalModelStatus> {
+    models::list_models_combined(&app)
+}
+
+#[tauri::command]
+pub fn list_catalog() -> Vec<models::ModelInfo> {
+    models::list_catalog()
 }
 
 #[tauri::command]
@@ -50,18 +54,18 @@ pub fn download_model(app: AppHandle, id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn delete_model(app: AppHandle, id: String) -> Result<(), String> {
-    models::delete_model(&app, &id)
+pub fn delete_model_folder(app: AppHandle, folder_name: String) -> Result<(), String> {
+    models::delete_model_folder(&app, &folder_name)
 }
 
 #[tauri::command]
-pub fn set_active_model(app: AppHandle, id: String) -> Result<(), String> {
-    models::set_active(&app, &id)
+pub fn set_active_model_folder(app: AppHandle, folder_name: String) -> Result<(), String> {
+    models::set_active_model_folder(&app, &folder_name)
 }
 
 #[tauri::command]
-pub fn get_active_model(app: AppHandle) -> Option<String> {
-    models::get_active(&app)
+pub fn get_active_model_folder(app: AppHandle) -> Option<String> {
+    models::get_active_model_folder(&app)
 }
 
 #[tauri::command]
@@ -69,8 +73,28 @@ pub fn models_dir_path(app: AppHandle) -> Result<String, String> {
     Ok(models::models_dir(&app)?.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+pub fn set_models_dir(app: AppHandle, dir: String) -> Result<String, String> {
+    models::set_models_dir_path(&app, &dir)
+}
+
+#[tauri::command]
+pub fn import_model_files(app: AppHandle, paths: Vec<String>) -> Result<models::LocalModelStatus, String> {
+    models::import_model_files(&app, paths)
+}
+
+#[tauri::command]
+pub async fn pick_file(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let files = app.dialog().file().blocking_pick_files();
+    match files {
+        Some(paths) => Ok(paths.into_iter().map(|p| p.to_string()).collect()),
+        None => Ok(vec![]),
+    }
+}
+
 // =====================================================================
-// Exportación y utilidades (compatibilidad)
+// Exportación y utilidades
 // =====================================================================
 
 #[tauri::command]
@@ -124,7 +148,7 @@ pub fn read_text(path: String) -> Result<String, String> {
 // Notas y carpetas (tree-folder)
 // =====================================================================
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -132,7 +156,7 @@ pub struct FileEntry {
     pub children: Option<Vec<FileEntry>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct NoteInfo {
     pub name: String,
     pub path: String,
@@ -142,9 +166,7 @@ pub struct NoteInfo {
 #[tauri::command]
 pub async fn pick_folder(app: tauri::AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
-
     let folder = app.dialog().file().blocking_pick_folder();
-
     match folder {
         Some(path) => {
             let path_buf: PathBuf = path.to_string().into();
@@ -165,9 +187,7 @@ fn read_dir_recursive(path: PathBuf, max_depth: u32, current_depth: u32) -> Resu
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
-
     let is_dir = path.is_dir();
-
     let children = if is_dir && current_depth < max_depth {
         let mut entries = Vec::new();
         if let Ok(read_dir) = fs::read_dir(&path) {
@@ -186,7 +206,6 @@ fn read_dir_recursive(path: PathBuf, max_depth: u32, current_depth: u32) -> Resu
     } else {
         None
     };
-
     Ok(FileEntry {
         name,
         path: path.to_string_lossy().to_string(),
@@ -202,14 +221,8 @@ pub async fn read_note(path: String) -> Result<NoteInfo, String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "untitled".to_string());
-
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-
-    Ok(NoteInfo {
-        name,
-        path,
-        content,
-    })
+    Ok(NoteInfo { name, path, content })
 }
 
 #[tauri::command]
@@ -221,60 +234,36 @@ pub async fn save_note(path: String, content: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn create_note(dir_path: String, name: String) -> Result<NoteInfo, String> {
     let mut path = PathBuf::from(&dir_path);
-
-    let name = if name.ends_with(".md") {
-        name
-    } else {
-        format!("{}.md", name)
-    };
-
+    let name = if name.ends_with(".md") { name } else { format!("{}.md", name) };
     path.push(&name);
-
     if path.exists() {
         return Err(format!("Note '{}' already exists", name));
     }
-
     fs::write(&path, "").map_err(|e| e.to_string())?;
-
-    Ok(NoteInfo {
-        name,
-        path: path.to_string_lossy().to_string(),
-        content: String::new(),
-    })
+    Ok(NoteInfo { name: name.clone(), path: path.to_string_lossy().to_string(), content: String::new() })
 }
 
 #[tauri::command]
 pub async fn create_folder(dir_path: String, name: String) -> Result<FileEntry, String> {
     let mut path = PathBuf::from(&dir_path);
     path.push(&name);
-
     if path.exists() {
         return Err(format!("Folder '{}' already exists", name));
     }
-
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-
-    Ok(FileEntry {
-        name,
-        path: path.to_string_lossy().to_string(),
-        is_dir: true,
-        children: Some(vec![]),
-    })
+    Ok(FileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children: Some(vec![]) })
 }
 
 #[tauri::command]
 pub async fn delete_entry(path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
-
     if !path_buf.exists() {
         return Err("Path does not exist".to_string());
     }
-
     if path_buf.is_dir() {
         fs::remove_dir_all(&path_buf).map_err(|e| e.to_string())?;
     } else {
         fs::remove_file(&path_buf).map_err(|e| e.to_string())?;
     }
-
     Ok(())
 }
